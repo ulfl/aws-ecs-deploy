@@ -16,3 +16,4 @@ executable aws-ecs-deploy
                      , lens
                      , bytestring
                      , text
+                     , regex-tdfa
