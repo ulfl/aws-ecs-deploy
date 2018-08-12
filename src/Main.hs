@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Main where
 
@@ -37,17 +38,22 @@ import Network.AWS.ECS.RegisterTaskDefinition
     , rtdContainerDefinitions
     , rtdCpu
     , rtdExecutionRoleARN
+    , rtdFamily
     , rtdMemory
     , rtdNetworkMode
     , rtdRequiresCompatibilities
     )
 import Network.AWS.ECS.Types
-    ( ContainerDefinition(..)
+    ( Compatibility(..)
+    , ContainerDefinition(..)
+    , NetworkMode(..)
+    , TaskDefinition(..)
     , cdImage
     , csTaskDefinition
     , tdContainerDefinitions
     , tdCpu
     , tdExecutionRoleARN
+    , tdFamily
     , tdMemory
     , tdNetworkMode
     , tdRequiresCompatibilities
@@ -56,6 +62,15 @@ import Network.AWS.Env (envRegion)
 import Options.Applicative
 import Safe (headMay)
 import Text.Regex.TDFA ((=~))
+
+data TaskData = TaskData
+    { _family :: Text
+    , _compatibilities :: [Compatibility]
+    , _networkMode :: Maybe NetworkMode
+    , _cpu :: Maybe Text
+    , _memory :: Maybe Text
+    , _executionRoleArn :: Maybe Text
+    }
 
 data CmdArgs = CmdArgs
     { _CmdOptVerbose :: Bool
@@ -124,20 +139,38 @@ deployImage (CmdArgs _verbose imageLabel) = do
     let containerDefs = definition ^. tdContainerDefinitions
     putStrLn "container definitions:"
     print containerDefs
+    let TaskData {..} = extractParamsFromTaskDefinition definition
     registerResponse <-
         runResourceT . runAWS e $
         send
-            (registerTaskDefinition "bitbuybit" &
+            (registerTaskDefinition _family &
              rtdContainerDefinitions .~
              (map (switchImage (pack imageLabel)) containerDefs) &
-             rtdRequiresCompatibilities .~
-             (definition ^. tdRequiresCompatibilities) &
-             rtdNetworkMode .~ (definition ^. tdNetworkMode) &
-             rtdCpu .~ (definition ^. tdCpu) &
-             rtdMemory .~ (definition ^. tdMemory) &
-             rtdExecutionRoleARN .~ (definition ^. tdExecutionRoleARN))
+             rtdRequiresCompatibilities .~ _compatibilities &
+             rtdNetworkMode .~ _networkMode &
+             rtdCpu .~ _cpu &
+             rtdMemory .~ _memory &
+             rtdExecutionRoleARN .~ _executionRoleArn)
     print registerResponse
     return ()
+
+extractParamsFromTaskDefinition :: TaskDefinition -> TaskData
+extractParamsFromTaskDefinition taskDefinition =
+    let family =
+            case taskDefinition ^. tdFamily of
+                Just f -> f
+                Nothing ->
+                    error
+                        "The task definition in AWS does not have the \
+                        \family parameter set."
+     in TaskData
+            { _family = family
+            , _compatibilities = taskDefinition ^. tdRequiresCompatibilities
+            , _networkMode = taskDefinition ^. tdNetworkMode
+            , _cpu = taskDefinition ^. tdCpu
+            , _memory = taskDefinition ^. tdMemory
+            , _executionRoleArn = taskDefinition ^. tdExecutionRoleARN
+            }
 
 -- Expected format for image URL:
 -- "054015229942.dkr.ecr.eu-west-1.amazonaws.com/bitbuybit:bfcdf9c"
