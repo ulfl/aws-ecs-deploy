@@ -2,8 +2,10 @@
 
 module Main where
 
-import Control.Lens
+import Control.Applicative ((<**>))
+import Control.Lens ((&), (.~), (<&>), (?~), (^.), view)
 import qualified Data.ByteString.Char8 as BS8
+import Data.Semigroup ((<>))
 import Data.Text (Text, append, pack, unpack)
 import Network.AWS
     ( AccessKey(..)
@@ -51,10 +53,34 @@ import Network.AWS.ECS.Types
     , tdRequiresCompatibilities
     )
 import Network.AWS.Env (envRegion)
+import Options.Applicative
 import Safe (headMay)
 import Text.Regex.TDFA ((=~))
 
-main = do
+data CmdArgs = CmdArgs
+    { _CmdOptVerbose :: Bool
+    , _CmdOptDockerLabel :: String
+    }
+
+args :: Parser CmdArgs
+args =
+    CmdArgs <$>
+    switch (long "verbose" <> short 'v' <> help "Print debug information.") <*>
+    strOption
+        (long "docker-label" <> short 'l' <>
+         help "Replace the task image label with the provided label." <>
+         metavar "LABEL")
+
+main :: IO ()
+main = deployImage =<< execParser opts
+  where
+    opts =
+        info
+            (args <**> helper)
+            (fullDesc <> progDesc "Print a greeting for TARGET" <>
+             header "hello - a test for optparse-applicative")
+
+deployImage (CmdArgs _verbose imageLabel) = do
     let cluster = "minisites-cluster"
     e <-
         newEnv (FromFile "default" "/Users/ulf/.aws/credentials") <&> envRegion .~
@@ -102,7 +128,8 @@ main = do
         runResourceT . runAWS e $
         send
             (registerTaskDefinition "bitbuybit" &
-             rtdContainerDefinitions .~ (map (switchImage "abba") containerDefs) &
+             rtdContainerDefinitions .~
+             (map (switchImage (pack imageLabel)) containerDefs) &
              rtdRequiresCompatibilities .~
              (definition ^. tdRequiresCompatibilities) &
              rtdNetworkMode .~ (definition ^. tdNetworkMode) &

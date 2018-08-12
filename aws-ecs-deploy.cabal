@@ -17,3 +17,4 @@ executable aws-ecs-deploy
                      , bytestring
                      , text
                      , regex-tdfa
+                     , optparse-applicative
