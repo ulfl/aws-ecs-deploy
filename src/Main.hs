@@ -61,6 +61,20 @@ import Network.AWS.ECS.Types
     )
 import Network.AWS.Env (envRegion)
 import Options.Applicative
+    ( Parser(..)
+    , execParser
+    , help
+    , long
+    , metavar
+    , short
+    , strOption
+    , switch
+    , info
+    , helper
+    , fullDesc
+    , infoFooter
+    , progDesc
+    )
 import Safe (headMay)
 import Text.Regex.TDFA ((=~))
 
@@ -93,7 +107,7 @@ args =
          metavar "SERVICE-REGEXP") <*>
     strOption
         (long "docker-label" <> short 'l' <>
-         help "Replace the task image label with the provided label." <>
+         help "Docker label to replace the current task image label with." <>
          metavar "LABEL")
 
 main :: IO ()
@@ -102,8 +116,10 @@ main = deployImage =<< execParser opts
     opts =
         info
             (args <**> helper)
-            (fullDesc <> progDesc "Print a greeting for TARGET" <>
-             header "hello - a test for optparse-applicative")
+            (fullDesc <>
+             progDesc -- replace by: infoFooter
+                 "Tool for updating image labels in ECS task \
+                 \defintions in order to deploy new docker images.")
 
 deployImage (CmdArgs _verbose cluster serviceRegexp imageLabel) = do
     e <-
