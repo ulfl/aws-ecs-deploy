@@ -5,6 +5,7 @@ module Main where
 
 import Control.Applicative ((<**>))
 import Control.Lens ((&), (.~), (<&>), (?~), (^.), view)
+import Control.Monad (when)
 import qualified Data.ByteString.Char8 as BS8
 import Data.Semigroup ((<>))
 import Data.Text (Text, append, pack, unpack)
@@ -74,6 +75,8 @@ data TaskData = TaskData
 
 data CmdArgs = CmdArgs
     { _CmdOptVerbose :: Bool
+    , _CmdOptCluster :: String
+    , _CmdOptServiceRegexp :: String
     , _CmdOptDockerLabel :: String
     }
 
@@ -81,6 +84,13 @@ args :: Parser CmdArgs
 args =
     CmdArgs <$>
     switch (long "verbose" <> short 'v' <> help "Print debug information.") <*>
+    strOption
+        (long "cluster" <> short 'c' <>
+         help "ECS cluster the service belongs to." <>
+         metavar "CLUSTER") <*>
+    strOption
+        (long "service" <> short 's' <> help "Regexp identifying the service." <>
+         metavar "SERVICE-REGEXP") <*>
     strOption
         (long "docker-label" <> short 'l' <>
          help "Replace the task image label with the provided label." <>
@@ -95,24 +105,28 @@ main = deployImage =<< execParser opts
             (fullDesc <> progDesc "Print a greeting for TARGET" <>
              header "hello - a test for optparse-applicative")
 
-deployImage (CmdArgs _verbose imageLabel) = do
-    let cluster = "minisites-cluster"
+deployImage (CmdArgs _verbose cluster serviceRegexp imageLabel) = do
     e <-
         newEnv (FromFile "default" "/Users/ulf/.aws/credentials") <&> envRegion .~
         Ireland
     servicesResponse <-
-        runResourceT . runAWS e $ send (listServices & lsCluster ?~ cluster)
+        runResourceT . runAWS e $
+        send (listServices & lsCluster ?~ (pack cluster))
     let serviceArns = view lsrsServiceARNs servicesResponse
-        serviceArn =
-            case headMay serviceArns of
-                Just serviceArn' -> serviceArn'
-                Nothing -> error "no service"
     print serviceArns
-    print serviceArn
+    let matchingServiceArn =
+            filter
+                (\service -> unpack service =~ serviceRegexp :: Bool)
+                serviceArns
+    when (length matchingServiceArn == 0) (error "No matching services.")
+    when
+        (length matchingServiceArn > 1)
+        (error "More than one matching service.")
     describeServicesResponse <-
         runResourceT . runAWS e $
         send
-            (describeServices & dCluster ?~ cluster & dServices .~ [serviceArn])
+            (describeServices & dCluster ?~ (pack cluster) &
+             dServices .~ matchingServiceArn)
     let containerServices = view dssrsServices describeServicesResponse
         containerService =
             case headMay containerServices of
