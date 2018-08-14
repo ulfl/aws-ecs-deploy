@@ -59,21 +59,21 @@ import Network.AWS.ECS.Types
     , tdNetworkMode
     , tdRequiresCompatibilities
     )
-import Network.AWS.Env (envRegion)
+import Network.AWS.Env (Env(..), envRegion)
 import Options.Applicative
     ( Parser(..)
     , execParser
+    , fullDesc
     , help
+    , helper
+    , info
+    , infoFooter
     , long
     , metavar
+    , progDesc
     , short
     , strOption
     , switch
-    , info
-    , helper
-    , fullDesc
-    , infoFooter
-    , progDesc
     )
 import Safe (headMay)
 import Text.Regex.TDFA ((=~))
@@ -121,57 +121,38 @@ main = deployImage =<< execParser opts
                  "Tool for updating image labels in ECS task \
                  \defintions in order to deploy new docker images.")
 
-deployImage (CmdArgs _verbose cluster serviceRegexp imageLabel) = do
-    e <-
+deployImage (CmdArgs verbose cluster serviceRegexp imageLabel) = do
+    env <-
         newEnv (FromFile "default" "/Users/ulf/.aws/credentials") <&> envRegion .~
         Ireland
-    servicesResponse <-
-        runResourceT . runAWS e $
-        send (listServices & lsCluster ?~ (pack cluster))
-    let serviceArns = view lsrsServiceARNs servicesResponse
-    print serviceArns
-    let matchingServiceArn =
-            filter
-                (\service -> unpack service =~ serviceRegexp :: Bool)
-                serviceArns
-    when (length matchingServiceArn == 0) (error "No matching services.")
-    when
-        (length matchingServiceArn > 1)
-        (error "More than one matching service.")
-    describeServicesResponse <-
-        runResourceT . runAWS e $
-        send
-            (describeServices & dCluster ?~ (pack cluster) &
-             dServices .~ matchingServiceArn)
-    let containerServices = view dssrsServices describeServicesResponse
-        containerService =
-            case headMay containerServices of
-                Just containerService' -> containerService'
-                Nothing -> error "no container service"
-    -- print $ show containerService
-    let taskDefinition =
-            case view csTaskDefinition containerService of
-                Just taskDefinition' -> taskDefinition'
-                Nothing -> error "no task definition ARN"
+    matchingServiceArn <-
+        getMatchingServiceArn env (pack cluster) serviceRegexp verbose
+    when verbose $ do
+        putStrLn "\nSelected ECS service:"
+        putStrLn (unpack matchingServiceArn)
+    taskDefinitionArn <-
+        getTaskDefinitionArnForService env (pack cluster) matchingServiceArn
+    when verbose $ do
+        putStrLn "\nCurrently configured task definition for service:"
+        putStrLn (unpack taskDefinitionArn)
     describeTaskDefinitionResponse <-
-        runResourceT . runAWS e $ send (describeTaskDefinition taskDefinition)
+        runResourceT . runAWS env $
+        send (describeTaskDefinition taskDefinitionArn)
     -- print $ view desrsTaskDefinition describeTaskDefinitionResponse
-    putStrLn "task definition arn:"
-    print taskDefinition
     putStrLn "task definition resp:"
     print describeTaskDefinitionResponse
     let definition =
             case describeTaskDefinitionResponse ^. desrsTaskDefinition of
                 Just def -> def
                 Nothing -> error "no task definition data"
-    putStrLn "task definition2:"
+    putStrLn "task definition:"
     print definition
     let containerDefs = definition ^. tdContainerDefinitions
     putStrLn "container definitions:"
     print containerDefs
     let TaskData {..} = extractParamsFromTaskDefinition definition
     registerResponse <-
-        runResourceT . runAWS e $
+        runResourceT . runAWS env $
         send
             (registerTaskDefinition _family &
              rtdContainerDefinitions .~
@@ -184,10 +165,46 @@ deployImage (CmdArgs _verbose cluster serviceRegexp imageLabel) = do
     print registerResponse
     return ()
 
+getMatchingServiceArn :: Env -> Text -> String -> Bool -> IO Text
+getMatchingServiceArn env cluster serviceRegexp verbose = do
+    servicesResponse <-
+        runResourceT . runAWS env $ send (listServices & lsCluster ?~ cluster)
+    let serviceArns = view lsrsServiceARNs servicesResponse
+    when verbose $ do
+        putStrLn "ECS services discovered:"
+        mapM_ (putStrLn . unpack) serviceArns
+    let matchingServiceArn =
+            filter
+                (\service -> unpack service =~ serviceRegexp :: Bool)
+                serviceArns
+    when (length matchingServiceArn == 0) (error "No matching services.")
+    when
+        (length matchingServiceArn > 1)
+        (error "More than one matching service.")
+    return $ head matchingServiceArn
+
+getTaskDefinitionArnForService :: Env -> Text -> Text -> IO Text
+getTaskDefinitionArnForService env cluster serviceArn = do
+    describeServicesResponse <-
+        runResourceT . runAWS env $
+        send
+            (describeServices & dCluster ?~ cluster & dServices .~ [serviceArn])
+    let containerServices = view dssrsServices describeServicesResponse
+        containerService =
+            case headMay containerServices of
+                Just containerService' -> containerService'
+                Nothing -> error "no container service"
+    -- print $ show containerService
+    let taskDefinitionArn =
+            case view csTaskDefinition containerService of
+                Just taskDefinition' -> taskDefinition'
+                Nothing -> error "no task definition ARN"
+    return taskDefinitionArn
+
 extractParamsFromTaskDefinition :: TaskDefinition -> TaskData
-extractParamsFromTaskDefinition taskDefinition =
+extractParamsFromTaskDefinition taskDefinitionArn =
     let family =
-            case taskDefinition ^. tdFamily of
+            case taskDefinitionArn ^. tdFamily of
                 Just f -> f
                 Nothing ->
                     error
@@ -195,11 +212,11 @@ extractParamsFromTaskDefinition taskDefinition =
                         \family parameter set."
      in TaskData
             { _family = family
-            , _compatibilities = taskDefinition ^. tdRequiresCompatibilities
-            , _networkMode = taskDefinition ^. tdNetworkMode
-            , _cpu = taskDefinition ^. tdCpu
-            , _memory = taskDefinition ^. tdMemory
-            , _executionRoleArn = taskDefinition ^. tdExecutionRoleARN
+            , _compatibilities = taskDefinitionArn ^. tdRequiresCompatibilities
+            , _networkMode = taskDefinitionArn ^. tdNetworkMode
+            , _cpu = taskDefinitionArn ^. tdCpu
+            , _memory = taskDefinitionArn ^. tdMemory
+            , _executionRoleArn = taskDefinitionArn ^. tdExecutionRoleARN
             }
 
 -- Expected format for image URL:
