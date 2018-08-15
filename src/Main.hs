@@ -12,7 +12,7 @@ import Data.Text (Text, append, pack, unpack)
 import Network.AWS
     ( AccessKey(..)
     , Credentials(FromKeys)
-    , Region(Ireland)
+    , Region(..)
     , RqBody
     , SecretKey(..)
     , newEnv
@@ -62,6 +62,7 @@ import Network.AWS.ECS.Types
 import Network.AWS.Env (Env(..), envRegion)
 import Options.Applicative
     ( Parser(..)
+    , auto
     , execParser
     , fullDesc
     , help
@@ -70,6 +71,7 @@ import Options.Applicative
     , infoFooter
     , long
     , metavar
+    , option
     , progDesc
     , short
     , strOption
@@ -89,6 +91,7 @@ data TaskData = TaskData
 
 data CmdArgs = CmdArgs
     { _CmdOptVerbose :: Bool
+    , _CmdOptRegion :: Region
     , _CmdOptCluster :: String
     , _CmdOptServiceRegexp :: String
     , _CmdOptDockerLabel :: String
@@ -98,6 +101,11 @@ args :: Parser CmdArgs
 args =
     CmdArgs <$>
     switch (long "verbose" <> short 'v' <> help "Print debug information.") <*>
+    option
+        auto
+        (long "region" <> short 'r' <>
+         help "AWS region the ECS cluster resides in." <>
+         metavar "Ireland|NorthCalifornia|etc.") <*>
     strOption
         (long "cluster" <> short 'c' <>
          help "ECS cluster the service belongs to." <>
@@ -121,10 +129,10 @@ main = deployImage =<< execParser opts
                  "Tool for updating image labels in ECS task \
                  \defintions in order to deploy new docker images.")
 
-deployImage (CmdArgs verbose cluster serviceRegexp imageLabel) = do
+deployImage (CmdArgs verbose region cluster serviceRegexp imageLabel) = do
     env <-
         newEnv (FromFile "default" "/Users/ulf/.aws/credentials") <&> envRegion .~
-        Ireland
+        region
     matchingServiceArn <-
         getMatchingServiceArn env (pack cluster) serviceRegexp verbose
     when verbose $ do
