@@ -76,9 +76,11 @@ import Options.Applicative
     , short
     , strOption
     , switch
+    , footerDoc
     )
 import Safe (headMay)
 import Text.Regex.TDFA ((=~))
+import Text.PrettyPrint.ANSI.Leijen (empty, text, fillBreak)
 
 data TaskData = TaskData
     { _family :: Text
@@ -127,12 +129,12 @@ main = deployImage =<< execParser opts
             (fullDesc <>
              progDesc -- replace by: infoFooter
                  "Tool for updating image labels in ECS task \
-                 \defintions in order to deploy new docker images.")
+                 \defintions in order to deploy new docker images." <>
+             footerDoc (Just $ text "AWS credentials will be picked up " <>
+                        "from the environment or the AWS credentials file."))
 
 deployImage (CmdArgs verbose region cluster serviceRegexp imageLabel) = do
-    env <-
-        newEnv (FromFile "default" "/Users/ulf/.aws/credentials") <&> envRegion .~
-        region
+    env <- newEnv Discover <&> envRegion .~ region
     matchingServiceArn <-
         getMatchingServiceArn env (pack cluster) serviceRegexp verbose
     when verbose $ do
