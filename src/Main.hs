@@ -43,6 +43,7 @@ import Network.AWS.ECS.RegisterTaskDefinition
     , rtdMemory
     , rtdNetworkMode
     , rtdRequiresCompatibilities
+    , rtdrsResponseStatus
     )
 import Network.AWS.ECS.Types
     ( Compatibility(..)
@@ -64,6 +65,7 @@ import Options.Applicative
     ( Parser(..)
     , auto
     , execParser
+    , footerDoc
     , fullDesc
     , help
     , helper
@@ -76,11 +78,11 @@ import Options.Applicative
     , short
     , strOption
     , switch
-    , footerDoc
     )
 import Safe (headMay)
+import System.Exit (die)
+import Text.PrettyPrint.ANSI.Leijen (empty, fillBreak, text)
 import Text.Regex.TDFA ((=~))
-import Text.PrettyPrint.ANSI.Leijen (empty, text, fillBreak)
 
 data TaskData = TaskData
     { _family :: Text
@@ -121,45 +123,39 @@ args =
          metavar "LABEL")
 
 main :: IO ()
-main = deployImage =<< execParser opts
+main = updateImageLabel =<< execParser opts
   where
     opts =
         info
             (args <**> helper)
             (fullDesc <>
-             progDesc -- replace by: infoFooter
+             progDesc
                  "Tool for updating image labels in ECS task \
                  \defintions in order to deploy new docker images." <>
-             footerDoc (Just $ text "AWS credentials will be picked up " <>
-                        "from the environment or the AWS credentials file."))
+             footerDoc
+                 (Just $
+                  text "AWS credentials will be picked up " <>
+                  "from the environment or the AWS credentials file."))
 
-deployImage (CmdArgs verbose region cluster serviceRegexp imageLabel) = do
+updateImageLabel (CmdArgs verbose region cluster serviceRegexp imageLabel) = do
     env <- newEnv Discover <&> envRegion .~ region
-    matchingServiceArn <-
-        getMatchingServiceArn env (pack cluster) serviceRegexp verbose
+    serviceArn <- getMatchingServiceArn env (pack cluster) serviceRegexp verbose
     when verbose $ do
         putStrLn "\nSelected ECS service:"
-        putStrLn (unpack matchingServiceArn)
+        putStrLn (unpack serviceArn)
     taskDefinitionArn <-
-        getTaskDefinitionArnForService env (pack cluster) matchingServiceArn
+        getTaskDefinitionArnForService env (pack cluster) serviceArn
     when verbose $ do
         putStrLn "\nCurrently configured task definition for service:"
         putStrLn (unpack taskDefinitionArn)
     describeTaskDefinitionResponse <-
         runResourceT . runAWS env $
         send (describeTaskDefinition taskDefinitionArn)
-    -- print $ view desrsTaskDefinition describeTaskDefinitionResponse
-    putStrLn "task definition resp:"
-    print describeTaskDefinitionResponse
     let definition =
             case describeTaskDefinitionResponse ^. desrsTaskDefinition of
                 Just def -> def
                 Nothing -> error "no task definition data"
-    putStrLn "task definition:"
-    print definition
     let containerDefs = definition ^. tdContainerDefinitions
-    putStrLn "container definitions:"
-    print containerDefs
     let TaskData {..} = extractParamsFromTaskDefinition definition
     registerResponse <-
         runResourceT . runAWS env $
@@ -172,7 +168,8 @@ deployImage (CmdArgs verbose region cluster serviceRegexp imageLabel) = do
              rtdCpu .~ _cpu &
              rtdMemory .~ _memory &
              rtdExecutionRoleARN .~ _executionRoleArn)
-    print registerResponse
+    when (registerResponse ^. rtdrsResponseStatus /= 200) $ do
+        die "Failed to register task definition."
     return ()
 
 getMatchingServiceArn :: Env -> Text -> String -> Bool -> IO Text
