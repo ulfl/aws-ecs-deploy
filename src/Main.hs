@@ -80,8 +80,16 @@ import Options.Applicative
     , switch
     )
 import Safe (headMay)
+import System.Environment (getProgName)
 import System.Exit (die)
-import Text.PrettyPrint.ANSI.Leijen (empty, fillBreak, text)
+import Text.PrettyPrint.ANSI.Leijen
+    ( Doc(..)
+    , empty
+    , fillBreak
+    , indent
+    , line
+    , text
+    )
 import Text.Regex.TDFA ((=~))
 
 data TaskData = TaskData
@@ -98,7 +106,8 @@ data CmdArgs = CmdArgs
     , _CmdOptRegion :: Region
     , _CmdOptCluster :: String
     , _CmdOptServiceRegexp :: String
-    , _CmdOptDockerLabel :: String
+    , _CmdOptOldImageRegexp :: String
+    , _CmdOptNewImage :: String
     }
 
 args :: Parser CmdArgs
@@ -118,26 +127,46 @@ args =
         (long "service" <> short 's' <> help "Regexp identifying the service." <>
          metavar "SERVICE-REGEXP") <*>
     strOption
-        (long "docker-label" <> short 'l' <>
-         help "Docker label to replace the current task image label with." <>
-         metavar "LABEL")
+        (long "old-image" <> short 'o' <>
+         help "Image to update the tag/digest for." <>
+         metavar "IMAGE-REGEXP") <*>
+    strOption
+        (long "new-image" <> short 'n' <>
+         help "New image to replace the old image with." <>
+         metavar "IMAGE-PATH")
 
 main :: IO ()
-main = updateImageLabel =<< execParser opts
+main = do
+    progName <- getProgName
+    config <- execParser (opts progName)
+    updateImageLabel config
   where
-    opts =
+    opts progName =
         info
             (args <**> helper)
             (fullDesc <>
              progDesc
                  "Tool for updating image labels in ECS task \
                  \defintions in order to deploy new docker images." <>
-             footerDoc
-                 (Just $
-                  text "AWS credentials will be picked up " <>
-                  "from the environment or the AWS credentials file."))
+             footerDoc (Just $ (footerDescription progName)))
 
-updateImageLabel (CmdArgs verbose region cluster serviceRegexp imageLabel) = do
+footerDescription :: String -> Doc
+footerDescription progName =
+    (text "AWS credentials will be picked up from the environment or the AWS") <>
+    (text "credentials file.") <>
+    line <>
+    line <>
+    (text "Example usage: ") <>
+    line <>
+    line <>
+    (indent
+         4
+         ((text progName) <>
+          (text " --verbose -r Ireland -c my-cluster -s myservice ") <>
+          (text
+               "-o myimage -n 054015229942.dkr.ecr.eu-west-1.amazonaws.com/myimage:label")))
+
+updateImageLabel (CmdArgs verbose region cluster serviceRegexp oldImageRegexp newImage) = do
     env <- newEnv Discover <&> envRegion .~ region
     serviceArn <- getMatchingServiceArn env (pack cluster) serviceRegexp verbose
     when verbose $ do
@@ -157,12 +186,20 @@ updateImageLabel (CmdArgs verbose region cluster serviceRegexp imageLabel) = do
                 Nothing -> error "no task definition data"
     let containerDefs = definition ^. tdContainerDefinitions
     let TaskData {..} = extractParamsFromTaskDefinition definition
+    when verbose $ do
+        putStrLn "\nCurrent images in container definition:"
+        print (map (\x -> x ^. cdImage) containerDefs)
+    let updatedContainerDefs =
+            (map (switchImage (pack oldImageRegexp) (pack newImage))
+                 containerDefs)
+    when verbose $ do
+        putStrLn "\nImages after update:"
+        print (map (\x -> x ^. cdImage) updatedContainerDefs)
     registerResponse <-
         runResourceT . runAWS env $
         send
             (registerTaskDefinition _family &
-             rtdContainerDefinitions .~
-             (map (switchImage (pack imageLabel)) containerDefs) &
+             rtdContainerDefinitions .~ updatedContainerDefs &
              rtdRequiresCompatibilities .~ _compatibilities &
              rtdNetworkMode .~ _networkMode &
              rtdCpu .~ _cpu &
@@ -226,16 +263,13 @@ extractParamsFromTaskDefinition taskDefinitionArn =
             , _executionRoleArn = taskDefinitionArn ^. tdExecutionRoleARN
             }
 
--- Expected format for image URL:
--- "054015229942.dkr.ecr.eu-west-1.amazonaws.com/bitbuybit:bfcdf9c"
-switchImage :: Text -> ContainerDefinition -> ContainerDefinition
-switchImage newDockerLabel containerDefinition =
+switchImage :: Text -> Text -> ContainerDefinition -> ContainerDefinition
+switchImage oldImageRegexp newImage containerDefinition =
     let currentImage =
             case containerDefinition ^. cdImage of
                 Just x -> x
                 Nothing ->
                     error "cdImage field not set in current task definition." :: Text
-        firstPart =
-            (unpack currentImage) =~ ("(.*/bitbuybit:).*" :: String) :: [[String]]
-     in containerDefinition &
-        cdImage .~ (Just (pack (firstPart !! 0 !! 1) `append` newDockerLabel))
+     in if (unpack currentImage) =~ ("(.*/.*:).*" :: String) :: Bool
+            then containerDefinition & cdImage .~ (Just newImage)
+            else containerDefinition
