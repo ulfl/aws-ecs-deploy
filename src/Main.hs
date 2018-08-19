@@ -7,6 +7,7 @@ import Control.Applicative ((<**>))
 import Control.Lens ((&), (.~), (<&>), (?~), (^.), view)
 import Control.Monad (when)
 import qualified Data.ByteString.Char8 as BS8
+import Data.Maybe (fromMaybe)
 import Data.Semigroup ((<>))
 import Data.Text (Text, append, pack, unpack)
 import Network.AWS
@@ -44,6 +45,7 @@ import Network.AWS.ECS.RegisterTaskDefinition
     , rtdNetworkMode
     , rtdRequiresCompatibilities
     , rtdrsResponseStatus
+    , rtdrsTaskDefinition
     )
 import Network.AWS.ECS.Types
     ( Compatibility(..)
@@ -59,6 +61,12 @@ import Network.AWS.ECS.Types
     , tdMemory
     , tdNetworkMode
     , tdRequiresCompatibilities
+    , tdTaskDefinitionARN
+    )
+import Network.AWS.ECS.UpdateService
+    ( updateService
+    , usCluster
+    , usTaskDefinition
     )
 import Network.AWS.Env (Env(..), envRegion)
 import Options.Applicative
@@ -105,7 +113,7 @@ data CmdArgs = CmdArgs
     { _CmdOptVerbose :: Bool
     , _CmdOptRegion :: Region
     , _CmdOptCluster :: String
-    , _CmdOptServiceRegexp :: String
+    , _CmdOptService :: String
     , _CmdOptOldImageRegexp :: String
     , _CmdOptNewImage :: String
     }
@@ -124,8 +132,8 @@ args =
          help "ECS cluster the service belongs to." <>
          metavar "CLUSTER") <*>
     strOption
-        (long "service" <> short 's' <> help "Regexp identifying the service." <>
-         metavar "SERVICE-REGEXP") <*>
+        (long "service" <> short 's' <> help "Name of service to update." <>
+         metavar "SERVICE") <*>
     strOption
         (long "old-image" <> short 'o' <>
          help "Image to update the tag/digest for." <>
@@ -139,7 +147,7 @@ main :: IO ()
 main = do
     progName <- getProgName
     config <- execParser (opts progName)
-    updateImageLabel config
+    updateImageForService config
   where
     opts progName =
         info
@@ -162,13 +170,13 @@ footerDescription progName =
     (indent
          4
          ((text progName) <>
-          (text " --verbose -r Ireland -c my-cluster -s myservice ") <>
+          (text " --verbose -r Ireland -c mycluster -s myservice ") <>
           (text
                "-o myimage -n 054015229942.dkr.ecr.eu-west-1.amazonaws.com/myimage:label")))
 
-updateImageLabel (CmdArgs verbose region cluster serviceRegexp oldImageRegexp newImage) = do
+updateImageForService (CmdArgs verbose region cluster service oldImageRegexp newImage) = do
     env <- newEnv Discover <&> envRegion .~ region
-    serviceArn <- getMatchingServiceArn env (pack cluster) serviceRegexp verbose
+    serviceArn <- getMatchingServiceArn env (pack cluster) service verbose
     when verbose $ do
         putStrLn "\nSelected ECS service:"
         putStrLn (unpack serviceArn)
@@ -185,7 +193,7 @@ updateImageLabel (CmdArgs verbose region cluster serviceRegexp oldImageRegexp ne
                 Just def -> def
                 Nothing -> error "no task definition data"
     let containerDefs = definition ^. tdContainerDefinitions
-    let TaskData {..} = extractParamsFromTaskDefinition definition
+    let taskData = extractParamsFromTaskDefinition definition
     when verbose $ do
         putStrLn "\nCurrent images in container definition:"
         print (map (\x -> x ^. cdImage) containerDefs)
@@ -195,22 +203,17 @@ updateImageLabel (CmdArgs verbose region cluster serviceRegexp oldImageRegexp ne
     when verbose $ do
         putStrLn "\nImages after update:"
         print (map (\x -> x ^. cdImage) updatedContainerDefs)
-    registerResponse <-
+    taskDefinitionArn <-
+        registerTaskDefinitionAndReturnArn env taskData updatedContainerDefs
+    updateServiceResponse <-
         runResourceT . runAWS env $
         send
-            (registerTaskDefinition _family &
-             rtdContainerDefinitions .~ updatedContainerDefs &
-             rtdRequiresCompatibilities .~ _compatibilities &
-             rtdNetworkMode .~ _networkMode &
-             rtdCpu .~ _cpu &
-             rtdMemory .~ _memory &
-             rtdExecutionRoleARN .~ _executionRoleArn)
-    when (registerResponse ^. rtdrsResponseStatus /= 200) $ do
-        die "Failed to register task definition."
+            (updateService serviceArn & usCluster .~ (Just $ pack cluster) &
+             usTaskDefinition .~ Just taskDefinitionArn)
     return ()
 
 getMatchingServiceArn :: Env -> Text -> String -> Bool -> IO Text
-getMatchingServiceArn env cluster serviceRegexp verbose = do
+getMatchingServiceArn env cluster service verbose = do
     servicesResponse <-
         runResourceT . runAWS env $ send (listServices & lsCluster ?~ cluster)
     let serviceArns = view lsrsServiceARNs servicesResponse
@@ -218,9 +221,7 @@ getMatchingServiceArn env cluster serviceRegexp verbose = do
         putStrLn "ECS services discovered:"
         mapM_ (putStrLn . unpack) serviceArns
     let matchingServiceArn =
-            filter
-                (\service -> unpack service =~ serviceRegexp :: Bool)
-                serviceArns
+            filter (\x -> unpack x =~ service :: Bool) serviceArns
     when (length matchingServiceArn == 0) (error "No matching services.")
     when
         (length matchingServiceArn > 1)
@@ -248,12 +249,11 @@ getTaskDefinitionArnForService env cluster serviceArn = do
 extractParamsFromTaskDefinition :: TaskDefinition -> TaskData
 extractParamsFromTaskDefinition taskDefinitionArn =
     let family =
-            case taskDefinitionArn ^. tdFamily of
-                Just f -> f
-                Nothing ->
-                    error
-                        "The task definition in AWS does not have the \
-                        \family parameter set."
+            fromMaybe
+                (error
+                     "The task definition in AWS does not have the \
+                        \family parameter set.")
+                (taskDefinitionArn ^. tdFamily)
      in TaskData
             { _family = family
             , _compatibilities = taskDefinitionArn ^. tdRequiresCompatibilities
@@ -266,10 +266,30 @@ extractParamsFromTaskDefinition taskDefinitionArn =
 switchImage :: Text -> Text -> ContainerDefinition -> ContainerDefinition
 switchImage oldImageRegexp newImage containerDefinition =
     let currentImage =
-            case containerDefinition ^. cdImage of
-                Just x -> x
-                Nothing ->
-                    error "cdImage field not set in current task definition." :: Text
-     in if (unpack currentImage) =~ ("(.*/.*:).*" :: String) :: Bool
-            then containerDefinition & cdImage .~ (Just newImage)
+            fromMaybe
+                (error "cdImage field not set in current task definition.")
+                (containerDefinition ^. cdImage)
+     in if unpack currentImage =~ ("(.*/.*:).*" :: String) :: Bool
+            then containerDefinition & cdImage .~ Just newImage
             else containerDefinition
+
+registerTaskDefinitionAndReturnArn ::
+       Env -> TaskData -> [ContainerDefinition] -> IO Text
+registerTaskDefinitionAndReturnArn env TaskData {..} updatedContainerDefs = do
+    registerResponse <-
+        runResourceT . runAWS env $
+        send
+            (registerTaskDefinition _family &
+             rtdContainerDefinitions .~ updatedContainerDefs &
+             rtdRequiresCompatibilities .~ _compatibilities &
+             rtdNetworkMode .~ _networkMode &
+             rtdCpu .~ _cpu &
+             rtdMemory .~ _memory &
+             rtdExecutionRoleARN .~ _executionRoleArn)
+    when (registerResponse ^. rtdrsResponseStatus /= 200) $
+        die "Failed to register task definition."
+    let newTaskDefinition =
+            fromMaybe (error "tjo") (registerResponse ^. rtdrsTaskDefinition)
+        taskDefinitionArn =
+            fromMaybe (error "tjo") (newTaskDefinition ^. tdTaskDefinitionARN)
+    return taskDefinitionArn
